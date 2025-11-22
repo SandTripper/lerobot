@@ -703,6 +703,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
             if force_cache_sync:
                 raise FileNotFoundError
             self.hf_dataset = self.load_hf_dataset()
+            self.hf_dataset = self.hf_dataset.select(range(self.meta.total_frames))
             # Check if cached dataset contains all requested episodes
             if not self._check_cached_episodes_sufficient():
                 raise FileNotFoundError("Cached dataset doesn't contain all requested episodes")

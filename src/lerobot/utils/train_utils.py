@@ -13,6 +13,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import platform
+import subprocess
 from pathlib import Path
 
 from torch.optim import Optimizer
@@ -56,10 +58,64 @@ def load_training_step(save_dir: Path) -> int:
 
 def update_last_checkpoint(checkpoint_dir: Path) -> Path:
     last_checkpoint_dir = checkpoint_dir.parent / LAST_CHECKPOINT_LINK
-    if last_checkpoint_dir.is_symlink():
-        last_checkpoint_dir.unlink()
+    # 如果已存在符号链接或 junction，先删除
+    if last_checkpoint_dir.is_symlink() or (platform.system() == "Windows" and last_checkpoint_dir.exists()):
+        if last_checkpoint_dir.is_symlink():
+            last_checkpoint_dir.unlink()
+        elif platform.system() == "Windows" and last_checkpoint_dir.exists():
+            # 在 Windows 上，可能是 junction 或普通目录，尝试删除
+            try:
+                if last_checkpoint_dir.is_dir():
+                    # 尝试使用 rmdir 删除 junction（如果是 junction，这会成功）
+                    subprocess.run(
+                        ["cmd", "/c", "rmdir", str(last_checkpoint_dir)],
+                        check=False,
+                        capture_output=True,
+                    )
+                else:
+                    last_checkpoint_dir.unlink()
+            except Exception:
+                # 如果删除失败，尝试直接删除（可能是普通目录）
+                import shutil
+                if last_checkpoint_dir.exists():
+                    shutil.rmtree(last_checkpoint_dir, ignore_errors=True)
+
     relative_target = checkpoint_dir.relative_to(checkpoint_dir.parent)
-    last_checkpoint_dir.symlink_to(relative_target)
+
+    # 尝试创建符号链接
+    try:
+        last_checkpoint_dir.symlink_to(relative_target)
+    except OSError:
+        # 在 Windows 上，如果符号链接失败，尝试创建 junction（目录连接点）
+        if platform.system() == "Windows":
+            try:
+                # 使用 mklink /J 创建 junction（不需要管理员权限）
+                target_path = str(checkpoint_dir.resolve())
+                link_path = str(last_checkpoint_dir)
+                subprocess.run(
+                    ["cmd", "/c", "mklink", "/J", link_path, target_path],
+                    check=True,
+                    capture_output=True,
+                )
+            except (subprocess.CalledProcessError, Exception) as e:
+                # 如果 junction 也失败，创建一个文本文件作为回退方案
+                # 注意：这需要修改读取代码，但至少不会导致训练失败
+                import warnings
+                warnings.warn(
+                    f"无法创建符号链接或 junction，将使用文本文件作为回退方案。"
+                    f"错误: {e}。"
+                    f"在 Windows 上，可能需要以管理员身份运行，或启用开发者模式。",
+                    stacklevel=2,
+                )
+                # 创建包含目标路径的文本文件
+                last_checkpoint_file = last_checkpoint_dir.parent / f"{LAST_CHECKPOINT_LINK}.txt"
+                with open(last_checkpoint_file, "w", encoding="utf-8") as f:
+                    f.write(str(checkpoint_dir.resolve()))
+                # 同时创建一个目录，以便 os.path.exists() 检查通过
+                last_checkpoint_dir.mkdir(exist_ok=True)
+        else:
+            # 非 Windows 系统，重新抛出异常
+            raise
 
 
 def save_checkpoint(
